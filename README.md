@@ -70,14 +70,16 @@ exclude graph construction and library load.
 
 | case | mojo-igraph | python-igraph | result |
 | --- | ---: | ---: | --- |
-| BFS distances, 50k vertices / 400k edges | 7.77 ms | 13.27 ms | 1.71x faster |
-| PageRank, 50k vertices / 400k edges | 54.47 ms | 672.01 ms | 12.34x faster |
-| weak components, 100k vertices / 300k edges | 24.27 ms | 30.29 ms | 1.25x faster |
-| Brandes betweenness, 400 vertices / 3.2k edges | 14.27 ms | 16.86 ms | 1.18x faster |
+| BFS distances, 50k vertices / 400k edges | 7.51 ms | 15.44 ms | 2.06x faster |
+| PageRank, 50k vertices / 400k edges | 54.45 ms | 506.60 ms | 9.30x faster |
+| weak components, 100k vertices / 300k edges | 6.11 ms | 24.93 ms | 4.08x faster |
+| Brandes betweenness, 400 vertices / 3.2k edges | 4.76 ms | 17.08 ms | 3.59x faster |
 
-These are machine-specific measurements, not promises. In particular, the
-current kernels are single-threaded; dense workloads or upstream builds using
-different native optimizations may move the comparison the other way.
+These are machine-specific measurements, not promises. Brandes partitions
+independent sources across four CPU workers at 256 vertices and above; smaller
+graphs remain serial to avoid thread-dispatch overhead. BFS, components, and
+PageRank are serial. Different native builds or workloads may move the
+comparison either way.
 
 There is no GPU path: BFS, connected components, and Brandes are irregular
 CSR traversals with low arithmetic intensity, where host-device transfers and
@@ -91,9 +93,12 @@ measured workload.
 contiguous CSR adjacency representation for each required direction. NumPy owns
 the offsets, neighbour lists, and algorithm scratch buffers. ctypes passes their
 addresses as 64-bit integers to `src/capi.mojo`; the Mojo C ABI rebuilds typed
-`UnsafePointer`s and allocates nothing. The one compilation unit exports BFS,
-component labelling/Kosaraju SCC, PageRank, and Brandes kernels, so calls cross
-the language boundary once per operation rather than once per vertex or edge.
+`UnsafePointer`s and allocates nothing. SIMD fills initialize traversal scratch,
+and SIMD loads/stores reduce Brandes worker results with scalar remainder loops.
+Component groups are materialized only when iteration or indexing needs them.
+The one compilation unit exports BFS, component labelling/Kosaraju SCC,
+PageRank, and Brandes kernels, so serial calls cross the language boundary once
+per operation rather than once per vertex or edge.
 
 ## License
 

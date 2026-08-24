@@ -18,7 +18,8 @@ _SIGNATURES = {
     "mig_components": ([I] * 5, I),
     "mig_strong_components": ([I] * 9, I),
     "mig_pagerank": ([I, I, I, I, F, I, F, I, I], I),
-    "mig_betweenness": ([I] * 12, None),
+    "mig_betweenness": ([I] * 13, None),
+    "mig_reduce_betweenness": ([I] * 4, None),
 }
 
 _library: ctypes.CDLL | None = None

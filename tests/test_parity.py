@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import mojoigraph as mig
+import mojoigraph.graph as graph_module
 
 
 def same_partition(left, right):
@@ -84,11 +85,33 @@ def test_brandes_betweenness_matches_directed_and_undirected():
         assert np.allclose(ours.betweenness(vertices=[1, 3]), theirs.betweenness(vertices=[1, 3]))
 
 
-def test_brandes_simd_tail_matches_igraph():
+def test_brandes_serial_threshold_and_simd_tail_matches_igraph(monkeypatch):
+    class RejectPool:
+        def submit(self, *_args, **_kwargs):
+            raise AssertionError("small Brandes graph used the parallel path")
+
+    monkeypatch.setattr(graph_module, "_BRANDES_POOL", RejectPool())
     edges = [(v, (v + 1) % 37) for v in range(37)] + [(v, (v + 5) % 37) for v in range(0, 37, 3)]
     theirs = ig.Graph(37, edges, directed=True)
     ours = mig.Graph(37, edges, directed=True)
     assert np.allclose(ours.betweenness(), theirs.betweenness(), atol=1e-12)
+
+
+def test_brandes_parallel_threshold_and_simd_tail_match_igraph():
+    n = graph_module._BRANDES_PARALLEL_THRESHOLD + 1
+    edges = [(v, (v + 1) % n) for v in range(n)] + [(v, (v + 17) % n) for v in range(0, n, 5)]
+    theirs = ig.Graph(n, edges, directed=True)
+    ours = mig.Graph(n, edges, directed=True)
+    assert np.allclose(ours.betweenness(), theirs.betweenness(), atol=1e-11)
+
+
+def test_bfs_and_components_simd_tails_match_igraph():
+    n = 37
+    edges = [(v, v + 1) for v in range(n - 1)] + [(0, 19), (12, 30)]
+    theirs = ig.Graph(n, edges, directed=True)
+    ours = mig.Graph(n, edges, directed=True)
+    assert ours.distances(source=0) == theirs.distances(source=0)
+    assert same_partition(ours.components(mode="weak"), theirs.components(mode="weak"))
 
 
 def test_brandes_multiedges_do_not_overrun_predecessor_storage():

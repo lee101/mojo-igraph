@@ -39,9 +39,8 @@ def fill_i64(values: IPtr, n: Int, value: Int64):
 
 
 def bfs_kernel(offsets: IPtr, neighbors: IPtr, n: Int, source: Int, depth: IPtr, parent: IPtr, queue: IPtr) -> Int:
-    for v in range(n):
-        depth[v] = -1
-        parent[v] = -2
+    fill_i64(depth, n, -1)
+    fill_i64(parent, n, -2)
     depth[source] = 0
     parent[source] = -1
     queue[0] = Int64(source)
@@ -61,8 +60,7 @@ def bfs_kernel(offsets: IPtr, neighbors: IPtr, n: Int, source: Int, depth: IPtr,
 
 
 def components_kernel(offsets: IPtr, neighbors: IPtr, n: Int, membership: IPtr, queue: IPtr) -> Int:
-    for v in range(n):
-        membership[v] = -1
+    fill_i64(membership, n, -1)
     var count = 0
     for seed in range(n):
         if membership[seed] >= 0:
@@ -162,9 +160,9 @@ def pagerank_kernel(in_offsets: IPtr, in_neighbors: IPtr, out_degree: IPtr, n: I
     return iterations
 
 
-def betweenness_kernel(offsets: IPtr, neighbors: IPtr, reverse_offsets: IPtr, reverse_neighbors: IPtr, n: Int, undirected: Int, result: FPtr, queue: IPtr, stack: IPtr, depth: IPtr, sigma: FPtr, delta: FPtr):
+def betweenness_worker(offsets: IPtr, neighbors: IPtr, reverse_offsets: IPtr, reverse_neighbors: IPtr, n: Int, first_source: Int, source_stride: Int, result: FPtr, queue: IPtr, stack: IPtr, depth: IPtr, sigma: FPtr, delta: FPtr):
     zero_f64(result, n)
-    for source in range(n):
+    for source in range(first_source, n, source_stride):
         fill_i64(depth, n, -1)
         zero_f64(sigma, n)
         zero_f64(delta, n)
@@ -197,9 +195,27 @@ def betweenness_kernel(offsets: IPtr, neighbors: IPtr, reverse_offsets: IPtr, re
                     delta[w] += (sigma[w] / sigma[v]) * (1.0 + delta[v])
             if v != source:
                 result[v] += delta[v]
+
+
+def reduce_betweenness(result: FPtr, n: Int, workers: Int, undirected: Int):
+    comptime W = simd_width_of[DType.float64]()
+    for worker in range(1, workers):
+        var partial = result + worker * n
+        var i = 0
+        while i + W <= n:
+            result.store(i, result.load[width=W](i) + partial.load[width=W](i))
+            i += W
+        while i < n:
+            result[i] += partial[i]
+            i += 1
     if undirected != 0:
-        for v in range(n):
-            result[v] *= 0.5
+        var i = 0
+        while i + W <= n:
+            result.store(i, result.load[width=W](i) * 0.5)
+            i += W
+        while i < n:
+            result[i] *= 0.5
+            i += 1
 
 
 @export("mig_bfs")
@@ -223,5 +239,10 @@ def mig_pagerank(in_offsets: Int, in_neighbors: Int, out_degree: Int, n: Int, da
 
 
 @export("mig_betweenness")
-def mig_betweenness(offsets: Int, neighbors: Int, reverse_offsets: Int, reverse_neighbors: Int, n: Int, undirected: Int, result: Int, queue: Int, stack: Int, depth: Int, sigma: Int, delta: Int) abi("C"):
-    betweenness_kernel(ip(offsets), ip(neighbors), ip(reverse_offsets), ip(reverse_neighbors), n, undirected, fp(result), ip(queue), ip(stack), ip(depth), fp(sigma), fp(delta))
+def mig_betweenness(offsets: Int, neighbors: Int, reverse_offsets: Int, reverse_neighbors: Int, n: Int, first_source: Int, source_stride: Int, result: Int, queue: Int, stack: Int, depth: Int, sigma: Int, delta: Int) abi("C"):
+    betweenness_worker(ip(offsets), ip(neighbors), ip(reverse_offsets), ip(reverse_neighbors), n, first_source, source_stride, fp(result), ip(queue), ip(stack), ip(depth), fp(sigma), fp(delta))
+
+
+@export("mig_reduce_betweenness")
+def mig_reduce_betweenness(result: Int, n: Int, workers: Int, undirected: Int) abi("C"):
+    reduce_betweenness(fp(result), n, workers, undirected)

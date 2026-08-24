@@ -5,10 +5,15 @@ from __future__ import annotations
 import math
 import operator
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
 from ._lib import addr, lib
+
+_BRANDES_PARALLEL_THRESHOLD = 256
+_BRANDES_WORKERS = 4
+_BRANDES_POOL = ThreadPoolExecutor(max_workers=_BRANDES_WORKERS)
 
 
 def _vertices(vertices, n: int) -> list[int]:
@@ -26,25 +31,32 @@ class VertexClustering:
 
     def __init__(self, graph: Graph, membership: Iterable[int], n: int):
         self.graph = graph
-        self.membership = [int(v) for v in membership]
-        self._groups = [[] for _ in range(n)]
-        for vertex, label in enumerate(self.membership):
-            self._groups[label].append(vertex)
+        self.membership = membership.tolist() if isinstance(membership, np.ndarray) else list(membership)
+        self._n = n
+        self._groups: list[list[int]] | None = None
+
+    def _materialize_groups(self) -> list[list[int]]:
+        if self._groups is None:
+            groups = [[] for _ in range(self._n)]
+            for vertex, label in enumerate(self.membership):
+                groups[label].append(vertex)
+            self._groups = groups
+        return self._groups
 
     def __len__(self) -> int:
-        return len(self._groups)
+        return self._n
 
     def __iter__(self):
-        return iter(self._groups)
+        return iter(self._materialize_groups())
 
     def __getitem__(self, index):
-        return self._groups[index]
+        return self._materialize_groups()[index]
 
     def sizes(self) -> list[int]:
-        return [len(group) for group in self._groups]
+        return [len(group) for group in self._materialize_groups()]
 
     def size(self, index: int) -> int:
-        return len(self._groups[index])
+        return len(self._materialize_groups()[index])
 
 
 class Graph:
@@ -246,18 +258,30 @@ class Graph:
             return []
         mode = "out" if directed else "all"
         offsets, neighbors = self._csr(mode)
-        result = np.empty(self._n, dtype=np.float64)
-        queue = np.empty(self._n, dtype=np.int64)
-        stack = np.empty(self._n, dtype=np.int64)
-        depth = np.empty(self._n, dtype=np.int64)
-        sigma = np.empty(self._n, dtype=np.float64)
-        delta = np.empty(self._n, dtype=np.float64)
+        workers = _BRANDES_WORKERS if self._n >= _BRANDES_PARALLEL_THRESHOLD else 1
+        shape = (workers, self._n)
+        result = np.empty(shape, dtype=np.float64)
+        queue = np.empty(shape, dtype=np.int64)
+        stack = np.empty(shape, dtype=np.int64)
+        depth = np.empty(shape, dtype=np.int64)
+        sigma = np.empty(shape, dtype=np.float64)
+        delta = np.empty(shape, dtype=np.float64)
         reverse_offsets, reverse_neighbors = self._csr("in" if self._directed and directed else "all")
-        lib().mig_betweenness(addr(offsets), addr(neighbors), addr(reverse_offsets), addr(reverse_neighbors), self._n,
-                              int(not (self._directed and directed)),
-                              addr(result), addr(queue), addr(stack), addr(depth), addr(sigma),
-                              addr(delta))
-        return result[_vertices(vertices, self._n)].tolist()
+        kernel = lib().mig_betweenness
+
+        def run_worker(worker: int):
+            kernel(addr(offsets), addr(neighbors), addr(reverse_offsets), addr(reverse_neighbors), self._n,
+                   worker, workers, addr(result[worker]), addr(queue[worker]), addr(stack[worker]),
+                   addr(depth[worker]), addr(sigma[worker]), addr(delta[worker]))
+
+        if workers == 1:
+            run_worker(0)
+        else:
+            for future in [_BRANDES_POOL.submit(run_worker, worker) for worker in range(workers)]:
+                future.result()
+        lib().mig_reduce_betweenness(addr(result), self._n, workers,
+                                     int(not (self._directed and directed)))
+        return result[0, _vertices(vertices, self._n)].tolist()
 
     def closeness(self, vertices=None, mode: str = "all", cutoff=None, weights=None, normalized: bool = True):
         self._check_unweighted(weights)
